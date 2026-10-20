@@ -1,9 +1,14 @@
 from model import objectives
-from .clip_model import Transformer, QuickGELU, LayerNorm, build_CLIP_from_openai_pretrained, convert_weights
+from .clip_model import (Transformer, QuickGELU, LayerNorm, build_CLIP_from_openai_pretrained,
+                         build_CLIP_from_irra_checkpoint, convert_weights)
 import numpy as np
 import torch
 import torch.nn as nn
 from collections import OrderedDict
+from .scfp.feature_frequency import AdaptiveFeatureFrequency
+from .scfp.semantic_slots import DualModalSemanticSlots
+from .scfp.local_alignment import local_similarity, local_alignment_loss
+from .scfp.diversity import slot_diversity
 
 
 class IRRA(nn.Module):
@@ -13,7 +18,12 @@ class IRRA(nn.Module):
         self.num_classes = num_classes
         self._set_task()
 
-        self.base_model, base_cfg = build_CLIP_from_openai_pretrained(args.pretrain_choice, args.img_size, args.stride_size)
+        checkpoint = (getattr(args, 'backbone_checkpoint', '') or
+                      getattr(args, 'resume_checkpoint', '') or getattr(args, 'init_checkpoint', ''))
+        if checkpoint:
+            self.base_model, base_cfg = build_CLIP_from_irra_checkpoint(checkpoint, args.img_size, args.stride_size)
+        else:
+            self.base_model, base_cfg = build_CLIP_from_openai_pretrained(args.pretrain_choice, args.img_size, args.stride_size)
         self.embed_dim = base_cfg['embed_dim']
 
         self.logit_scale = torch.ones([]) * (1 / args.temperature) 
@@ -87,12 +97,16 @@ class IRRA(nn.Module):
         x = self.base_model.encode_text(text)
         return x[torch.arange(x.shape[0]), text.argmax(dim=-1)].float()
 
-    def forward(self, batch):
+    def forward(self, batch, return_features=False):
         ret = dict()
 
         images = batch['images']
         caption_ids = batch['caption_ids']
+        frequency = getattr(self.base_model.visual, 'scfp_frequency', None)
+        if frequency is not None:
+            frequency.capture = return_features
         image_feats, text_feats = self.base_model(images, caption_ids)
+        self.scfp_features = {}
         i_feats = image_feats[:, 0, :].float()
         # i_feats = image_feats.float() # for CLIP ResNet visual model
         t_feats = text_feats[torch.arange(text_feats.shape[0]), caption_ids.argmax(dim=-1)].float()
@@ -110,8 +124,8 @@ class IRRA(nn.Module):
             ret.update({'cmpm_loss':objectives.compute_cmpm(i_feats, t_feats, batch['pids'])})
         
         if 'id' in self.current_task:
-            image_logits = self.classifier(i_feats.half()).float()
-            text_logits = self.classifier(t_feats.half()).float()
+            image_logits = self.classifier(i_feats.to(self.classifier.weight.dtype)).float()
+            text_logits = self.classifier(t_feats.to(self.classifier.weight.dtype)).float()
             ret.update({'id_loss':objectives.compute_id(image_logits, text_logits, batch['pids'])*self.args.id_loss_weight})
 
             image_pred = torch.argmax(image_logits, dim=1)
@@ -140,11 +154,53 @@ class IRRA(nn.Module):
             acc = (pred[mlm_label_idx] == mlm_labels[mlm_label_idx]).float().mean()
             ret.update({'mlm_acc': acc})
 
+        if hasattr(self, 'scfp_slots'):
+            features = self.scfp_slots(image_feats[:, 1:], text_feats, caption_ids)
+            similarity = local_similarity(features['visual_slots'], features['text_slots'],
+                                          features['slot_relevance'])
+            ret['slot_loss'] = local_alignment_loss(similarity, batch['pids'], logit_scale) * self.args.scfp_slot_loss_weight
+            ret['diversity_loss'] = (slot_diversity(features['visual_slots']) +
+                                     slot_diversity(features['text_slots'])) * 0.5 * self.args.scfp_diversity_weight
+            self.scfp_features = {k: v.detach() for k, v in features.items()}
+            self.scfp_features['local_similarity'] = similarity.detach()
+        if return_features:
+            features_out = dict(features) if hasattr(self, 'scfp_slots') else {}
+            frequency = getattr(self.base_model.visual, 'scfp_frequency', None)
+            if frequency is not None:
+                features_out.update(frequency.last_features)
+            return ret, features_out
         return ret
 
 
 def build_model(args, num_classes=11003):
     model = IRRA(args, num_classes)
-    # covert model to fp16
-    convert_weights(model)
+    if getattr(args, 'precision', 'fp16') == 'fp16':
+        convert_weights(model)
+    mode = getattr(args, 'scfp_mode', 'baseline')
+    if mode not in ('baseline', 'slots', 'frequency', 'v2'):
+        raise ValueError(f'Unknown SCFP mode: {mode}')
+    model.scfp_mode = mode
+    if mode in ('frequency', 'v2'):
+        visual = model.base_model.visual
+        if not hasattr(visual, 'transformer'):
+            raise ValueError('SCFP requires a CLIP ViT backbone')
+        layer = getattr(args, 'scfp_frequency_layer', 6)
+        if not 1 <= layer < len(visual.transformer.resblocks):
+            raise ValueError('Frequency layer must precede at least one remaining ViT block')
+        visual.scfp_frequency_layer = layer
+        visual.scfp_frequency = AdaptiveFeatureFrequency(
+            visual.conv1.out_channels,
+            getattr(args, 'scfp_frequency_num_bands', 4),
+            getattr(args, 'scfp_frequency_hidden_dim', 64),
+            getattr(args, 'scfp_frequency_temperature', 1.0),
+            getattr(args, 'scfp_frequency_alpha_init', 0.01))
+    if mode in ('slots', 'v2'):
+        model.scfp_slots = DualModalSemanticSlots(
+            model.embed_dim, getattr(args, 'scfp_num_slots', 4),
+            getattr(args, 'scfp_slot_heads', 4), getattr(args, 'scfp_slot_dropout', 0.0),
+            args.vocab_size)
+    if getattr(args, 'freeze_backbone', False):
+        for name, parameter in model.base_model.named_parameters():
+            if 'scfp_frequency.' not in name:
+                parameter.requires_grad_(False)
     return model

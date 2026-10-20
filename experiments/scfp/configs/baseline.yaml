@@ -1,0 +1,13 @@
+scfp_mode: baseline
+scfp_num_slots: 4
+scfp_slot_heads: 4
+scfp_slot_loss_weight: 0.1
+scfp_diversity_weight: 0.01
+scfp_slot_dropout: 0.0
+scfp_frequency_layer: 6
+scfp_frequency_num_bands: 4
+scfp_frequency_hidden_dim: 64
+scfp_frequency_temperature: 1.0
+scfp_frequency_alpha_init: 0.01
+scfp_frequency_variant: bounded_radial
+scfp_lr: 0.0001

@@ -286,6 +286,7 @@ class VisionTransformer(nn.Module):
 
     def forward(self, x: torch.Tensor):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
+        grid_size = x.shape[-2:]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
         x = torch.cat([self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device), x], dim=1)  # shape = [*, grid ** 2 + 1, width]
@@ -293,7 +294,13 @@ class VisionTransformer(nn.Module):
         x = self.ln_pre(x)
 
         x = x.permute(1, 0, 2)  # NLD -> LND
-        x = self.transformer(x)
+        if getattr(self, 'scfp_frequency', None) is None:
+            x = self.transformer(x)
+        else:
+            for index, block in enumerate(self.transformer.resblocks, start=1):
+                x = block(x)
+                if index == self.scfp_frequency_layer:
+                    x = self.scfp_frequency(x.permute(1, 0, 2), grid_size).permute(1, 0, 2)
         x = x.permute(1, 0, 2)  # LND -> NLD
 
         # x = self.ln_post(x[:, 0, :])
@@ -503,6 +510,38 @@ def convert_weights(model: nn.Module):
                     attr.data = attr.data.half()
 
     model.apply(_convert_weights_to_fp16)
+
+
+def build_CLIP_from_irra_checkpoint(path, image_size, stride_size):
+    """Reconstruct CLIP from IRRA tensor shapes, without a second OpenAI download.
+
+    All tensors (including IRRA heads and SCFP) are validated/loaded later by
+    Checkpointer. This constructor does not silently resize checkpoint tensors.
+    """
+    checkpoint = torch.load(path, map_location='cpu', weights_only=False)
+    state = checkpoint.get('model', checkpoint)
+    state = {k.removeprefix('module.').removeprefix('base_model.'): v
+             for k, v in state.items() if k.removeprefix('module.').startswith('base_model.')}
+    if 'visual.proj' not in state:
+        raise ValueError('Offline checkpoint construction requires an IRRA CLIP ViT checkpoint')
+    vision_width = state['visual.conv1.weight'].shape[0]
+    patch_size = state['visual.conv1.weight'].shape[-1]
+    vision_layers = len([k for k in state if k.startswith('visual.transformer.resblocks.')
+                         and k.endswith('.attn.in_proj_weight')])
+    text_width = state['ln_final.weight'].shape[0]
+    text_layers = len([k for k in state if k.startswith('transformer.resblocks.')
+                       and k.endswith('.attn.in_proj_weight')])
+    h, w = ((size - patch_size) // stride_size + 1 for size in image_size)
+    if state['visual.positional_embedding'].shape[0] != 1 + h * w:
+        raise ValueError('Checkpoint patch grid differs from configured image size/stride')
+    config = dict(embed_dim=state['text_projection'].shape[1], image_resolution=image_size,
+                  vision_layers=vision_layers, vision_width=vision_width,
+                  vision_patch_size=patch_size, stride_size=stride_size,
+                  context_length=state['positional_embedding'].shape[0],
+                  vocab_size=state['token_embedding.weight'].shape[0],
+                  transformer_width=text_width, transformer_heads=text_width // 64,
+                  transformer_layers=text_layers)
+    return CLIP(**config), config
 
 
 def build_CLIP_from_openai_pretrained(name: str, image_size: Union[int, Tuple[int, int]], stride_size: int, jit: bool = False, download_root: str = None):

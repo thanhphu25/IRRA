@@ -1,0 +1,12 @@
+# Keep Kaggle's CUDA torch/torchvision; install these lightweight dependencies.
+numpy
+Pillow
+PyYAML
+easydict
+prettytable
+ftfy
+regex
+tqdm
+tensorboard
+pytest
+nbformat

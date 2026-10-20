@@ -1,15 +1,26 @@
 import argparse
+import yaml
 
 
-def get_args():
+def get_args(argv=None):
     parser = argparse.ArgumentParser(description="IRRA Args")
+    parser.add_argument('--experiment_config', help='Optional SCFP YAML preset; explicit CLI flags override it')
     ######################## general settings ########################
     parser.add_argument("--local_rank", default=0, type=int)
     parser.add_argument("--name", default="baseline", help="experiment name to save")
     parser.add_argument("--output_dir", default="logs")
-    parser.add_argument("--log_period", default=100)
-    parser.add_argument("--eval_period", default=1)
-    parser.add_argument("--val_dataset", default="test") # use val set when evaluate, if test use test set
+    parser.add_argument("--log_period", default=100, type=int)
+    parser.add_argument("--eval_period", default=1, type=int)
+    parser.add_argument("--val_dataset", default="test", choices=['test', 'val', 'holdout', 'none'])
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--device', default='cuda')
+    parser.add_argument('--precision', choices=['fp16', 'fp32'], default='fp16')
+    parser.add_argument('--training_protocol', choices=['legacy', 'warmstart', 'scientific'], default='legacy')
+    parser.add_argument('--validation_fraction', type=float, default=0.1)
+    parser.add_argument('--eval_chunk_size', type=int, default=128)
+    parser.add_argument('--max_steps', type=int, default=0, help='Optional engineering budget per epoch')
+    parser.add_argument('--init_checkpoint', default='')
+    parser.add_argument('--resume_checkpoint', default='')
     parser.add_argument("--resume", default=False, action='store_true')
     parser.add_argument("--resume_ckpt_file", default="", help='resume from ...')
 
@@ -31,7 +42,7 @@ def get_args():
     parser.add_argument("--id_loss_weight", type=float, default=1.0, help="id loss weight")
     
     ######################## vison trainsformer settings ########################
-    parser.add_argument("--img_size", type=tuple, default=(384, 128))
+    parser.add_argument("--img_size", type=int, nargs=2, default=(384, 128))
     parser.add_argument("--stride_size", type=int, default=16)
 
     ######################## text transformer settings ########################
@@ -69,6 +80,68 @@ def get_args():
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--test", dest='training', default=True, action='store_false')
 
-    args = parser.parse_args()
+    parser.add_argument('--scfp_mode', choices=['baseline', 'slots', 'frequency', 'v2'], default='baseline')
+    parser.add_argument('--scfp_num_slots', type=int, default=4)
+    parser.add_argument('--scfp_slot_heads', type=int, default=4)
+    parser.add_argument('--scfp_slot_loss_weight', type=float, default=0.1)
+    parser.add_argument('--scfp_diversity_weight', type=float, default=0.01)
+    parser.add_argument('--scfp_slot_dropout', type=float, default=0.0)
+    parser.add_argument('--scfp_frequency_layer', type=int, default=6)
+    parser.add_argument('--scfp_frequency_num_bands', type=int, default=4)
+    parser.add_argument('--scfp_frequency_hidden_dim', type=int, default=64)
+    parser.add_argument('--scfp_frequency_temperature', type=float, default=1.0)
+    parser.add_argument('--scfp_frequency_alpha_init', type=float, default=0.01)
+    parser.add_argument('--scfp_frequency_variant', choices=['bounded_radial'], default='bounded_radial')
+    parser.add_argument('--scfp_lr', type=float, default=1e-4)
+    parser.add_argument('--freeze_backbone', action='store_true')
+    parser.add_argument('--scfp_diagnostics', action='store_true')
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument('--experiment_config')
+    preliminary, _ = config_parser.parse_known_args(argv)
+    if preliminary.experiment_config:
+        with open(preliminary.experiment_config) as stream:
+            settings = yaml.safe_load(stream)
+        if not isinstance(settings, dict):
+            parser.error('Experiment config must be a YAML mapping')
+        actions = {action.dest: action for action in parser._actions}
+        # Runtime fields recorded in configs.yaml are recomputed by entrypoints.
+        settings.pop('distributed', None)
+        settings.pop('backbone_checkpoint', None)
+        for key, value in settings.items():
+            if key not in actions:
+                parser.error(f'Unknown experiment setting: {key}')
+            action = actions[key]
+            if action.choices and value not in action.choices:
+                parser.error(f'Invalid {key}: {value}')
+            if action.type and action.nargs is None:
+                settings[key] = action.type(value)
+        parser.set_defaults(**settings)
+    args = parser.parse_args(argv)
+    if args.resume:
+        if args.resume_checkpoint:
+            parser.error('Use only one resume flag')
+        args.resume_checkpoint = args.resume_ckpt_file
+    if args.init_checkpoint and args.resume_checkpoint:
+        parser.error('init_checkpoint and resume_checkpoint are mutually exclusive')
+    if args.precision == 'fp16' and args.device == 'cpu':
+        args.precision = 'fp32'
+    if 'mlm' in args.loss_names.split('+'):
+        args.MLM = True
+    if args.scfp_mode != 'baseline' and args.training_protocol == 'legacy':
+        parser.error('SCFP training requires --training_protocol warmstart or scientific')
+    if args.training_protocol == 'warmstart':
+        if not (args.init_checkpoint or args.resume_checkpoint):
+            parser.error('warmstart requires init_checkpoint or resume_checkpoint')
+        if args.val_dataset != 'none':
+            parser.error('warmstart is engineering only: use --val_dataset none')
+    if args.training_protocol == 'scientific':
+        if args.init_checkpoint:
+            parser.error('scientific protocol starts from CLIP, not an IRRA checkpoint')
+        if args.val_dataset != 'holdout':
+            parser.error('scientific protocol requires --val_dataset holdout')
+    if args.num_epoch < 1 or args.max_steps < 0 or args.eval_period < 1 or args.log_period < 1:
+        parser.error('Invalid training/logging budget')
+    if min(args.scfp_slot_loss_weight, args.scfp_diversity_weight) < 0:
+        parser.error('Auxiliary loss weights must be nonnegative')
 
     return args

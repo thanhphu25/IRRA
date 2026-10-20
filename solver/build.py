@@ -22,6 +22,8 @@ def build_optimizer(args, model):
             weight_decay = args.weight_decay_bias
         if "classifier" in key or "mlm_head" in key:
             lr = args.lr * args.lr_factor
+        if 'scfp_frequency.' in key or key.removeprefix('module.').startswith('scfp_slots.'):
+            lr = getattr(args, 'scfp_lr', 1e-4)
         
         params += [{"params": [value], "lr": lr, "weight_decay": weight_decay}]
 
@@ -44,7 +46,7 @@ def build_optimizer(args, model):
             eps=1e-8,
         )
     else:
-        NotImplementedError
+        raise NotImplementedError(args.optimizer)
 
     return optimizer
 

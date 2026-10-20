@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.pth
+*.pt
+logs/
+SCFP_V2_runs/
+*.zip
+.ipynb_checkpoints/

@@ -1,0 +1,217 @@
+{
+  "status": "PASS",
+  "tiny": true,
+  "synthetic_data": true,
+  "original_checkpoint": null,
+  "checkpoint_report": null,
+  "mode": "v2",
+  "backbone": "ViT-B/16",
+  "actual_backbone": {
+    "visual_width": 64,
+    "visual_layers": 3,
+    "embedding_dim": 512
+  },
+  "image_shape": [
+    4,
+    3,
+    32,
+    16
+  ],
+  "text_shape": [
+    4,
+    8
+  ],
+  "feature_shapes": {
+    "visual_slots": [
+      4,
+      4,
+      512
+    ],
+    "text_slots": [
+      4,
+      4,
+      512
+    ],
+    "slot_relevance": [
+      4,
+      4
+    ],
+    "slot_relevance_raw": [
+      4,
+      4
+    ],
+    "visual_attention": [
+      4,
+      4,
+      8
+    ],
+    "text_attention": [
+      4,
+      4,
+      8
+    ],
+    "text_content_mask": [
+      4,
+      8
+    ],
+    "frequency_logits": [
+      4,
+      4
+    ],
+    "frequency_weights": [
+      4,
+      4
+    ],
+    "frequency_band_features": [
+      4,
+      4,
+      64
+    ]
+  },
+  "losses": {
+    "sdm_loss": 16.080902099609375,
+    "id_loss": 1.1023681163787842,
+    "mlm_loss": 4.455062389373779,
+    "slot_loss": 1.2149362564086914,
+    "diversity_loss": 0.007876862771809101
+  },
+  "total_loss": 22.86114501953125,
+  "gradient_norms": {
+    "visual_slots": 29.01699447631836,
+    "text_slots": 25.497318267822266,
+    "shared_queries": 2.228234052658081,
+    "frequency_gate": 0.016539504751563072,
+    "frequency_residual_scale": 0.011660771444439888,
+    "vision_backbone": 33.335670471191406,
+    "text_backbone": 108.12515258789062,
+    "frequency_gradient_norm": 0.016539504751563072
+  },
+  "trainable_parameters": 9565513,
+  "peak_gpu_memory": null,
+  "forward_seconds": 0.015215447056107223,
+  "backward_seconds": 0.0199259789660573,
+  "mean_embedding_cosine": 1.0,
+  "max_embedding_difference": 0.00020802021026611328,
+  "diagnostics": {
+    "frequency_alpha": 0.009999999776482582,
+    "frequency_weights_mean": [
+      0.24867340922355652,
+      0.2490023821592331,
+      0.2463763803243637,
+      0.2559478282928467
+    ],
+    "frequency_weights_std": [
+      0.0031268377788364887,
+      0.004630220588296652,
+      0.007699196692556143,
+      0.00423838384449482
+    ],
+    "frequency_weights_entropy": 1.3859734535217285,
+    "frequency_gate_variance_across_images": 2.711439628910739e-05,
+    "frequency_residual_norm": 0.012479091994464397,
+    "frequency_residual_ratio": 0.000267318042460829,
+    "frequency_imaginary_max": 0.0,
+    "visual_slot_similarity": [
+      [
+        0.9999999403953552,
+        0.7460404634475708,
+        0.7936806082725525,
+        0.8266603350639343
+      ],
+      [
+        0.7460404634475708,
+        1.0,
+        0.7733238935470581,
+        0.8274060487747192
+      ],
+      [
+        0.7936806082725525,
+        0.7733238935470581,
+        1.0000001192092896,
+        0.8338616490364075
+      ],
+      [
+        0.8266603350639343,
+        0.8274060487747192,
+        0.8338616490364075,
+        1.0
+      ]
+    ],
+    "visual_attention_entropy": 2.04746413230896,
+    "text_slot_similarity": [
+      [
+        1.0,
+        0.9634036421775818,
+        0.9542213082313538,
+        0.9599945545196533
+      ],
+      [
+        0.9634036421775818,
+        1.0,
+        0.9700143337249756,
+        0.9550425410270691
+      ],
+      [
+        0.9542213082313538,
+        0.9700143337249756,
+        1.0,
+        0.9618380069732666
+      ],
+      [
+        0.9599945545196533,
+        0.9550425410270691,
+        0.9618380069732666,
+        1.0
+      ]
+    ],
+    "text_attention_entropy": 0.6836587190628052,
+    "slot_relevance": [
+      0.25003552436828613,
+      0.25015419721603394,
+      0.2499987930059433,
+      0.24981153011322021
+    ],
+    "slot_relevance_raw": [
+      0.5489312410354614,
+      0.5491954684257507,
+      0.5488495826721191,
+      0.5484354496002197
+    ],
+    "positive_local_similarity": 0.024733059108257294,
+    "negative_local_similarity": 0.0077948118560016155,
+    "local_similarity_margin": 0.01693824678659439,
+    "paired_slot_matching_matrix": [
+      [
+        0.04710019379854202,
+        0.01745738461613655,
+        0.023252278566360474,
+        0.009408761747181416
+      ],
+      [
+        0.011157143861055374,
+        0.02063353732228279,
+        0.011711453087627888,
+        0.0023902938701212406
+      ],
+      [
+        0.02510903775691986,
+        0.010811579413712025,
+        0.03561277315020561,
+        0.011679566465318203
+      ],
+      [
+        0.023760583251714706,
+        0.006231099367141724,
+        0.01857108436524868,
+        0.025613749399781227
+      ]
+    ],
+    "paired_same_index_argmax_fraction": 1.0
+  },
+  "frequency_feature_shape": [
+    4,
+    64,
+    4,
+    2
+  ]
+}

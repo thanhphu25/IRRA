@@ -1,116 +1,105 @@
 import logging
 import time
+from pathlib import Path
+
 import torch
+from torch.utils.tensorboard import SummaryWriter
+
 from utils.meter import AverageMeter
 from utils.metrics import Evaluator
 from utils.comm import get_rank, synchronize
-from torch.utils.tensorboard import SummaryWriter
-from prettytable import PrettyTable
+from utils.checkpoint import unwrap
+from experiments.scfp.diagnostics import (append_jsonl, write_json, gradient_norms,
+                                          module_diagnostics, fixed_sample_diagnostics)
 
 
 def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
-             scheduler, checkpointer):
-
-    log_period = args.log_period
-    eval_period = args.eval_period
-    device = "cuda"
-    num_epoch = args.num_epoch
-    arguments = {}
-    arguments["num_epoch"] = num_epoch
-    arguments["iteration"] = 0
-
-    logger = logging.getLogger("IRRA.train")
-    logger.info('start training')
-
-    meters = {
-        "loss": AverageMeter(),
-        "sdm_loss": AverageMeter(),
-        "itc_loss": AverageMeter(),
-        "id_loss": AverageMeter(),
-        "mlm_loss": AverageMeter(),
-        "img_acc": AverageMeter(),
-        "txt_acc": AverageMeter(),
-        "mlm_acc": AverageMeter()
-    }
-
-    tb_writer = SummaryWriter(log_dir=args.output_dir)
-
-    best_top1 = 0.0
-
-    # train
-    for epoch in range(start_epoch, num_epoch + 1):
-        start_time = time.time()
-        for meter in meters.values():
-            meter.reset()
-        model.train()
-
-        for n_iter, batch in enumerate(train_loader):
-            batch = {k: v.to(device) for k, v in batch.items()}
-
-            ret = model(batch)
-            total_loss = sum([v for k, v in ret.items() if "loss" in k])
-
-            batch_size = batch['images'].shape[0]
-            meters['loss'].update(total_loss.item(), batch_size)
-            meters['sdm_loss'].update(ret.get('sdm_loss', 0), batch_size)
-            meters['itc_loss'].update(ret.get('itc_loss', 0), batch_size)
-            meters['id_loss'].update(ret.get('id_loss', 0), batch_size)
-            meters['mlm_loss'].update(ret.get('mlm_loss', 0), batch_size)
-
-            meters['img_acc'].update(ret.get('img_acc', 0), batch_size)
-            meters['txt_acc'].update(ret.get('txt_acc', 0), batch_size)
-            meters['mlm_acc'].update(ret.get('mlm_acc', 0), 1)
-
-            optimizer.zero_grad()
-            total_loss.backward()
-            optimizer.step()
+             scheduler, checkpointer, best_top1=None, best_epoch=None):
+    device = next(model.parameters()).device
+    logger = logging.getLogger('IRRA.train')
+    master = get_rank() == 0
+    core = unwrap(model)
+    writer = SummaryWriter(args.output_dir) if master else None
+    fixed_batch = None
+    fixed_path = Path(args.output_dir) / 'fixed_diagnostics_batch.pt'
+    if master:
+        (Path(args.output_dir) / 'validation_metrics.jsonl').touch(exist_ok=True)
+        if args.scfp_diagnostics and fixed_path.exists():
+            fixed_batch = torch.load(fixed_path, map_location=device, weights_only=True)
+    last_metrics = {}
+    try:
+        for epoch in range(start_epoch, args.num_epoch + 1):
+            started = time.perf_counter()
+            model.train()
+            if hasattr(train_loader.sampler, 'set_epoch'):
+                train_loader.sampler.set_epoch(epoch)
+            meters = {}
+            steps = 0
+            for n_iter, batch in enumerate(train_loader):
+                batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
+                if master and args.scfp_diagnostics and fixed_batch is None:
+                    fixed_batch = {k: v[:4].detach().clone() for k, v in batch.items()}
+                    torch.save({k: v.cpu() for k, v in fixed_batch.items()}, fixed_path)
+                ret = model(batch)
+                total_loss = sum(v for k, v in ret.items() if k.endswith('_loss'))
+                if not torch.isfinite(total_loss):
+                    raise FloatingPointError(f'Nonfinite training loss at epoch {epoch}, step {n_iter}')
+                optimizer.zero_grad(set_to_none=True)
+                total_loss.backward()
+                log_now = n_iter == 0 or (n_iter + 1) % args.log_period == 0
+                diagnostics = {}
+                if master and args.scfp_diagnostics and log_now:
+                    diagnostics = module_diagnostics(core, batch['pids'])
+                    diagnostics['gradient_norms'] = gradient_norms(core)
+                optimizer.step()
+                for key, value in dict(ret, total_loss=total_loss).items():
+                    meters.setdefault(key, AverageMeter()).update(float(value.detach()), len(batch['images']))
+                steps += 1
+                if master and log_now:
+                    logger.info('Epoch %d step %d/%d: %s', epoch, steps, len(train_loader),
+                                ', '.join(f'{k}={v.avg:.4f}' for k, v in meters.items() if 'loss' in k))
+                    append_jsonl(Path(args.output_dir) / 'training_stats.jsonl',
+                                 dict(kind='step', epoch=epoch, step=steps,
+                                      losses={k: float(v.detach()) for k, v in ret.items() if k.endswith('_loss')},
+                                      total_loss=float(total_loss.detach()), diagnostics=diagnostics))
+                if args.max_steps and steps >= args.max_steps:
+                    break
+            if not steps:
+                raise ValueError('Training loader is empty')
+            scheduler.step()
             synchronize()
-
-            if (n_iter + 1) % log_period == 0:
-                info_str = f"Epoch[{epoch}] Iteration[{n_iter + 1}/{len(train_loader)}]"
-                # log loss and acc info
-                for k, v in meters.items():
-                    if v.avg > 0:
-                        info_str += f", {k}: {v.avg:.4f}"
-                info_str += f", Base Lr: {scheduler.get_lr()[0]:.2e}"
-                logger.info(info_str)
-        
-        tb_writer.add_scalar('lr', scheduler.get_lr()[0], epoch)
-        tb_writer.add_scalar('temperature', ret['temperature'], epoch)
-        for k, v in meters.items():
-            if v.avg > 0:
-                tb_writer.add_scalar(k, v.avg, epoch)
-
-
-        scheduler.step()
-        if get_rank() == 0:
-            end_time = time.time()
-            time_per_batch = (end_time - start_time) / (n_iter + 1)
-            logger.info(
-                "Epoch {} done. Time per batch: {:.3f}[s] Speed: {:.1f}[samples/s]"
-                .format(epoch, time_per_batch,
-                        train_loader.batch_size / time_per_batch))
-        if epoch % eval_period == 0:
-            if get_rank() == 0:
-                logger.info("Validation Results - Epoch: {}".format(epoch))
-                if args.distributed:
-                    top1 = evaluator.eval(model.module.eval())
-                else:
-                    top1 = evaluator.eval(model.eval())
-
-                torch.cuda.empty_cache()
-                if best_top1 < top1:
-                    best_top1 = top1
-                    arguments["epoch"] = epoch
-                    checkpointer.save("best", **arguments)
-    if get_rank() == 0:
-        logger.info(f"best R1: {best_top1} at epoch {arguments['epoch']}")
+            if master:
+                stats = dict(kind='epoch', epoch=epoch, steps=steps,
+                             seconds=time.perf_counter() - started,
+                             **{k: v.avg for k, v in meters.items()})
+                append_jsonl(Path(args.output_dir) / 'training_stats.jsonl', stats)
+                for key, meter in meters.items():
+                    writer.add_scalar(key, meter.avg, epoch)
+                writer.add_scalar('lr', scheduler.get_last_lr()[0], epoch)
+                if evaluator is not None and epoch % args.eval_period == 0:
+                    top1 = evaluator.eval(core.eval(), full_metrics=False)
+                    last_metrics = dict(epoch=epoch, split=args.val_dataset, metrics=evaluator.last_metrics)
+                    append_jsonl(Path(args.output_dir) / 'validation_metrics.jsonl', last_metrics)
+                    if best_top1 is None or top1 > best_top1:
+                        best_top1, best_epoch = top1, epoch
+                        checkpointer.save('best', epoch=epoch, best_top1=best_top1, best_epoch=best_epoch)
+                if fixed_batch is not None:
+                    fixed_sample_diagnostics(core, fixed_batch, args.output_dir, epoch)
+                elif args.scfp_diagnostics:
+                    write_json(Path(args.output_dir) / 'diagnostics.json', module_diagnostics(core))
+                checkpointer.save('last', epoch=epoch, best_top1=best_top1, best_epoch=best_epoch)
+                write_json(Path(args.output_dir) / 'metrics.json',
+                           dict(protocol=args.training_protocol, validation=last_metrics,
+                                best_top1=best_top1, best_epoch=best_epoch,
+                                official_test='NOT RUN'))
+                logger.info('Epoch %d saved; best validation R1=%s at epoch %s', epoch, best_top1, best_epoch)
+            synchronize()
+    finally:
+        if writer:
+            writer.close()
 
 
 def do_inference(model, test_img_loader, test_txt_loader):
-
-    logger = logging.getLogger("IRRA.test")
-    logger.info("Enter inferencing")
-
     evaluator = Evaluator(test_img_loader, test_txt_loader)
-    top1 = evaluator.eval(model.eval())
+    evaluator.eval(model.eval(), full_metrics=True)
+    return evaluator.last_metrics

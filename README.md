@@ -133,3 +133,7 @@ If you find this code useful for your research, please cite our paper.
 
 ## Contact
 If you have any question, please feel free to contact us. E-mail: [jiangding@whu.edu.cn](mailto:jiangding@whu.edu.cn), [yemang@whu.edu.cn](mailto:yemang@whu.edu.cn).
+
+## SCFP V2 research extension
+
+The `feat/scfp-v2` branch implements semantic slots and adaptive feature-level FFT with `baseline`, `slots`, `frequency` and `v2` ablations. See [implementation, protocols and exact Kaggle commands](experiments/scfp/README.md), [observed validation results](experiments/scfp/validation_report.md), and [Kaggle notebook](notebooks/irra_scfp_v2_icfg_kaggle.ipynb). V3 is not implemented. CLI defaults preserve the IRRA baseline architecture.

@@ -1,4 +1,6 @@
 import logging
+import json
+import os
 import torch
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
@@ -13,6 +15,7 @@ from .bases import ImageDataset, TextDataset, ImageTextDataset, ImageTextMLMData
 from .cuhkpedes import CUHKPEDES
 from .icfgpedes import ICFGPEDES
 from .rstpreid import RSTPReid
+from .splits import train_validation_holdout
 
 __factory = {'CUHK-PEDES': CUHKPEDES, 'ICFG-PEDES': ICFGPEDES, 'RSTPReid': RSTPReid}
 
@@ -74,6 +77,25 @@ def build_dataloader(args, tranforms=None):
     num_workers = args.num_workers
     dataset = __factory[args.dataset_name](root=args.root_dir)
     num_classes = len(dataset.train_id_container)
+    split = getattr(args, 'val_dataset', 'test')
+    if args.training and split == 'holdout':
+        dataset.train, dataset.val, held_ids = train_validation_holdout(
+            dataset.train, getattr(args, 'validation_fraction', 0.1), getattr(args, 'seed', 42))
+        manifest = dict(seed=args.seed, fraction=args.validation_fraction,
+                        train_ids=sorted({r[0] for r in dataset.train}), validation_ids=held_ids,
+                        classifier_num_classes=num_classes)
+        if getattr(args, 'output_dir', None):
+            os.makedirs(args.output_dir, exist_ok=True)
+            path = os.path.join(args.output_dir, 'split_manifest.json')
+            if os.path.exists(path):
+                with open(path) as f:
+                    if json.load(f) != manifest:
+                        raise ValueError('Resume split differs from saved split manifest')
+            else:
+                with open(path, 'w') as f:
+                    json.dump(manifest, f, indent=2)
+        logger.info('Identity holdout: %d train / %d validation identities',
+                    len(manifest['train_ids']), len(held_ids))
     
     if args.training:
         train_transforms = build_transforms(img_size=args.img_size,
@@ -82,7 +104,7 @@ def build_dataloader(args, tranforms=None):
         val_transforms = build_transforms(img_size=args.img_size,
                                           is_train=False)
 
-        if args.MLM:
+        if args.MLM or 'mlm' in args.loss_names.split('+'):
             train_set = ImageTextMLMDataset(dataset.train,
                                      train_transforms,
                                      text_length=args.text_length)
@@ -101,6 +123,8 @@ def build_dataloader(args, tranforms=None):
                     dataset.train, args.batch_size, args.num_instance)
                 batch_sampler = torch.utils.data.sampler.BatchSampler(
                     data_sampler, mini_batch_size, True)
+                train_loader = DataLoader(train_set, batch_sampler=batch_sampler,
+                                          num_workers=num_workers, collate_fn=collate)
 
             else:
                 logger.info(
@@ -118,14 +142,18 @@ def build_dataloader(args, tranforms=None):
             logger.info('using random sampler')
             train_loader = DataLoader(train_set,
                                       batch_size=args.batch_size,
-                                      shuffle=True,
+                                      shuffle=not args.distributed,
+                                      sampler=DistributedSampler(train_set) if args.distributed else None,
                                       num_workers=num_workers,
                                       collate_fn=collate)
         else:
             logger.error('unsupported sampler! expected softmax or triplet but got {}'.format(args.sampler))
 
-        # use test set as validate set
-        ds = dataset.val if args.val_dataset == 'val' else dataset.test
+        if split == 'none':
+            return train_loader, None, None, num_classes
+        ds = dataset.val if split in ('val', 'holdout') else dataset.test
+        if not ds['img_paths'] or not ds['captions']:
+            raise ValueError('Empty validation split; choose holdout or none for ICFG-PEDES')
         val_img_set = ImageDataset(ds['image_pids'], ds['img_paths'],
                                    val_transforms)
         val_txt_set = TextDataset(ds['caption_pids'],
