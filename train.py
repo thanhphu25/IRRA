@@ -70,6 +70,8 @@ if __name__ == '__main__':
         write_json(Path(args.output_dir) / 'resume_environment.json', environment(args))
     if args.training_protocol == 'legacy' and args.val_dataset == 'test':
         logger.warning('Legacy IRRA evaluates test during training; do not use this for SCFP model selection')
+    if args.training_protocol == 'irra':
+        logger.info('IRRA comparison: initialize from CLIP, train all training identities, select best by official-test R1')
 
     # get image-text pair datasets dataloader
     train_loader, val_img_loader, val_txt_loader, num_classes = build_dataloader(args)

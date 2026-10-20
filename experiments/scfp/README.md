@@ -3,6 +3,20 @@
 This is an experimental extension of IRRA, **not an established improvement**.
 V3 semantic guidance, teachers and distillation are deliberately absent.
 
+## Lean training notebook: matched IRRA comparison
+
+Use [`irra_scfp_v2_train_kaggle.ipynb`](../../notebooks/irra_scfp_v2_train_kaggle.ipynb) for the user's requested comparison with the original IRRA training run. It has **three code cells**: configuration, git clone/setup, and training. Import the notebook, attach only the original ICFG-PEDES dataset (`ICFG-PEDES.json` and `imgs/`), enable GPU and Internet, then Run All. Setup clones `https://github.com/thanhphu25/IRRA.git`, branch `feat/scfp-v2`, and prints the cloned commit. That branch must contain the updated launcher before the notebook can run.
+
+Defaults: V2, **60 epochs**, batch 64, backbone LR 1e-5, SCFP LR 1e-4, seed **1** as in original IRRA. The repository supplies the original ViT-B/16 architecture (384×128), Adam optimizer and LR multipliers, SDM/MLM/ID losses, cosine schedule and five warmup epochs; the notebook enables augmentation like `run_irra.sh`. Fresh training needs no old `configs.yaml`, trained checkpoint, source ZIP, or `processed_data/*.pkl`. The launcher still accepts an optional baseline config for users who explicitly want to import custom settings. New runs initialize from pretrained CLIP. `configs.yaml` is generated in the new run's **output** directory for provenance and resume. Set `EXPERIMENT="baseline"` to rerun the control under the same setup.
+
+This explicitly selected `--training_protocol irra` uses **all official training identities**, evaluates official-test R1/R5/R10 each epoch, and selects `best.pth` by official-test R1, following the original IRRA pipeline. It is a paper-style comparison protocol, **not independent validation**; metadata labels the selection split as `test`. The separate `scientific` protocol still requires a pre-training PID holdout. Do not describe test-based checkpoint selection as unseen validation or tune additional hyperparameters on those scores.
+
+The lean notebook skips unit tests, smoke runs and fixed-sample diagnostics, saves `best.pth` / `last.pth` with configs and logs, and computes exact R1/R5/R10/mAP/mINP after training. Outputs stay under `/kaggle/working/SCFP_V2_train`; checkpoints are not duplicated into an automatic ZIP. Set `RESUME_CHECKPOINT` to the original run's last.pth to continue its saved total budget and schedule. Resume also works when only `last.pth` is attached: the launcher restores its embedded configuration. For a run mounted in read-only Kaggle Input, only checkpoints and matching run artifacts are copied into Working, with writable copies for appending logs. Unrelated image/code trees are not staged. Baseline config is not needed for resume; existing Input files remain untouched.
+
+Training logs stream into the notebook, and the output directory is printed before launching. Interrupting the training cell stops its child process group, including DataLoader workers; resume continues after the last completed epoch saved in last.pth. The launcher works independently of the notebook's current directory. Setup clears cached modules from the previous source on rerun.
+
+The cloned branch must include `experiments/scfp/kaggle_train.py` and `experiments/scfp/requirements-train.txt`; setup reports a clear error if the latest notebook code has not been published yet. The notebook is prepared and tested locally using a local Git clone fixture and a toy CPU training/evaluation/resume pipeline; actual Kaggle T4 execution and the 60-epoch real-data run have not been executed here. The older engineering notebook below retains its optional ZIP-source workflow.
+
 ## Repository audit
 
 - Branch: `feat/scfp-v2`, created directly from updated `main`.
@@ -86,11 +100,14 @@ All files in `model/scfp/` are newly written experimental code, conceptually ada
 | `experiments/scfp/smoke_test.py` | One-batch real/tiny forward/backward, near-identity and checkpoint checks |
 | `experiments/scfp/diagnostics.py` | Gradient/slot/frequency statistics, fixed samples, environment/source provenance |
 | `experiments/scfp/bundle.py` | Package current working source without pushing; source hash manifest |
+| `experiments/scfp/kaggle_train.py` | Dataset-only IRRA comparison defaults, optional config import, full training, final metrics and resume |
 | `experiments/scfp/configs/{baseline,slots,frequency,v2}.yaml` | Four CLI-loadable ablation presets |
 | `experiments/scfp/requirements.txt` | Lightweight modern dependencies; retain Kaggle CUDA torch/torchvision |
+| `experiments/scfp/requirements-train.txt` | Training dependencies without pytest/nbformat |
 | `experiments/scfp/validation_report.md` | Actual observed tests and outstanding Kaggle checks |
 | `experiments/scfp/reports/cpu_tiny_smoke.json` | Raw observed synthetic CPU smoke diagnostics |
 | `notebooks/irra_scfp_v2_icfg_kaggle.ipynb` | Single-GPU setup, source ZIP/branch, smoke/train/evaluation/export |
+| `notebooks/irra_scfp_v2_train_kaggle.ipynb` | Three-cell Git clone and dataset-only, 60-epoch from-CLIP training |
 | `tests/test_feature_frequency.py` | Grid, dtype, symmetry, adaptivity, initialization and gradient checks |
 | `tests/test_semantic_slots.py` | Slot shapes, masks, short/empty text, relevance and gradients |
 | `tests/test_local_alignment.py` | Repeated PID targets, SDM equivalence and degenerate batches |
@@ -99,6 +116,7 @@ All files in `model/scfp/` are newly written experimental code, conceptually ada
 | `tests/test_metrics.py` | Exact full/chunked equivalence and missing positives |
 | `tests/test_workflow.py` | Protocol guards, presets, split, Kaggle utilities and train/save/resume |
 | `tests/test_notebook.py` | Notebook schema/syntax/defaults and source bundle |
+| `tests/test_kaggle_train.py` | Matched config/protocol, lean notebook, actual toy CLI training/evaluation/resume |
 | `tests/test_cuda.py` | CUDA autocast/FP16 tests, skipped when CUDA unavailable |
 | `tests/helpers.py`, `tests/conftest.py`, `tests/__init__.py` | Offline small-CLIP fixtures and test setup |
 | `tests/fixtures/irra_build_main.py` | Unmodified baseline snapshot from the base commit for regression |

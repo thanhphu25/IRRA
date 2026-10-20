@@ -19,6 +19,24 @@ def test_notebook_schema_python_cells_branch_and_safe_defaults():
     assert config['BRANCH'] == 'feat/scfp-v2'
     assert config['EPOCHS'] == 1 and config['EXPERIMENT'] == 'v2'
     assert not config['RUN_FINAL_TEST'] and not config['RUN_BASELINE_EVALUATION']
+    assert config['SOURCE_DIR'] is None
+
+
+def test_notebook_finds_kaggle_extracted_source(tmp_path):
+    import zipfile
+    archive = bundle(tmp_path / 'source.zip')
+    inputs = tmp_path / 'input'
+    extracted = inputs / 'dataset'
+    with zipfile.ZipFile(archive) as stream:
+        stream.extractall(extracted)
+    notebook = nbformat.read('notebooks/irra_scfp_v2_icfg_kaggle.ipynb', as_version=4)
+    setup = notebook.cells[2].source
+    start = setup.index('root = Path(INPUT_ROOT)')
+    stop = setup.index('REPO = Path(')
+    env = dict(Path=Path, INPUT_ROOT=str(inputs), SOURCE_ZIP=None, SOURCE_DIR=None)
+    exec(setup[start:stop], env)
+    assert env['SOURCE_DIR'] == str(extracted)
+    assert env['SOURCE_ZIP'] is None
 
 
 def test_source_bundle_complete(tmp_path):

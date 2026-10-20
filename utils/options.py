@@ -15,7 +15,7 @@ def get_args(argv=None):
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--device', default='cuda')
     parser.add_argument('--precision', choices=['fp16', 'fp32'], default='fp16')
-    parser.add_argument('--training_protocol', choices=['legacy', 'warmstart', 'scientific'], default='legacy')
+    parser.add_argument('--training_protocol', choices=['legacy', 'warmstart', 'scientific', 'irra'], default='legacy')
     parser.add_argument('--validation_fraction', type=float, default=0.1)
     parser.add_argument('--eval_chunk_size', type=int, default=128)
     parser.add_argument('--max_steps', type=int, default=0, help='Optional engineering budget per epoch')
@@ -128,7 +128,7 @@ def get_args(argv=None):
     if 'mlm' in args.loss_names.split('+'):
         args.MLM = True
     if args.scfp_mode != 'baseline' and args.training_protocol == 'legacy':
-        parser.error('SCFP training requires --training_protocol warmstart or scientific')
+        parser.error('SCFP training requires --training_protocol warmstart, scientific or irra')
     if args.training_protocol == 'warmstart':
         if not (args.init_checkpoint or args.resume_checkpoint):
             parser.error('warmstart requires init_checkpoint or resume_checkpoint')
@@ -139,6 +139,11 @@ def get_args(argv=None):
             parser.error('scientific protocol starts from CLIP, not an IRRA checkpoint')
         if args.val_dataset != 'holdout':
             parser.error('scientific protocol requires --val_dataset holdout')
+    if args.training_protocol == 'irra':
+        if args.init_checkpoint:
+            parser.error('irra comparison starts from pretrained CLIP, not a trained IRRA checkpoint')
+        if args.val_dataset != 'test':
+            parser.error('irra comparison uses the original full-train / official-test protocol')
     if args.num_epoch < 1 or args.max_steps < 0 or args.eval_period < 1 or args.log_period < 1:
         parser.error('Invalid training/logging budget')
     if min(args.scfp_slot_loss_weight, args.scfp_diversity_weight) < 0:

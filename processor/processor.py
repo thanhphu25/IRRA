@@ -91,8 +91,10 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
                 write_json(Path(args.output_dir) / 'metrics.json',
                            dict(protocol=args.training_protocol, validation=last_metrics,
                                 best_top1=best_top1, best_epoch=best_epoch,
-                                official_test='NOT RUN'))
-                logger.info('Epoch %d saved; best validation R1=%s at epoch %s', epoch, best_top1, best_epoch)
+                                selection_split=args.val_dataset if evaluator is not None else None,
+                                official_test=('MONITORED_DURING_TRAINING' if last_metrics.get('split') == 'test' else 'NOT RUN')))
+                logger.info('Epoch %d saved; best R1 (%s)=%s at epoch %s',
+                            epoch, args.val_dataset, best_top1, best_epoch)
             synchronize()
     finally:
         if writer:

@@ -137,3 +137,5 @@ If you have any question, please feel free to contact us. E-mail: [jiangding@whu
 ## SCFP V2 research extension
 
 The `feat/scfp-v2` branch implements semantic slots and adaptive feature-level FFT with `baseline`, `slots`, `frequency` and `v2` ablations. See [implementation, protocols and exact Kaggle commands](experiments/scfp/README.md), [observed validation results](experiments/scfp/validation_report.md), and [Kaggle notebook](notebooks/irra_scfp_v2_icfg_kaggle.ipynb). V3 is not implemented. CLI defaults preserve the IRRA baseline architecture.
+
+For the requested full training comparison with original IRRA, use the [three-cell training notebook](notebooks/irra_scfp_v2_train_kaggle.ipynb): Git clone the updated `feat/scfp-v2` branch, attach only the original ICFG-PEDES dataset, and train 60 epochs from pretrained CLIP with IRRA defaults. It generates configs/logs, saves best/last checkpoints and computes final exact metrics. Its `irra` protocol selects checkpoints by official-test R1 as in the original pipeline; the separate `scientific` protocol retains independent PID validation.

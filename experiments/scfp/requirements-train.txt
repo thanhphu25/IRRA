@@ -1,0 +1,10 @@
+# Retain Kaggle's CUDA torch/torchvision.
+numpy
+Pillow
+PyYAML
+easydict
+prettytable
+ftfy
+regex
+tqdm
+tensorboard
