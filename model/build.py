@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from collections import OrderedDict
+from .lgsp import LocalGlobalSpatialFusion
 
 
 class IRRA(nn.Module):
@@ -16,7 +17,7 @@ class IRRA(nn.Module):
         self.base_model, base_cfg = build_CLIP_from_openai_pretrained(args.pretrain_choice, args.img_size, args.stride_size)
         self.embed_dim = base_cfg['embed_dim']
 
-        self.logit_scale = torch.ones([]) * (1 / args.temperature) 
+        self.register_buffer('logit_scale', torch.ones([]) * (1 / args.temperature), persistent=False)
 
         if 'id' in args.loss_names:
             self.classifier = nn.Linear(self.embed_dim, self.num_classes)
@@ -59,6 +60,16 @@ class IRRA(nn.Module):
             nn.init.normal_(self.mlm_head.dense.weight, std=fc_std)
             nn.init.normal_(self.mlm_head.fc.weight, std=proj_std)
 
+        # Construct after the historical layers: baseline initialization is unchanged.
+        self.spatial_prompt = LocalGlobalSpatialFusion(**{
+            k: v for k, v in vars(args).items() if k.startswith(('frequency_', 'local_'))
+        }, mode=getattr(args, 'lgsp_mode', 'baseline'), diagnostics=getattr(args, 'lgsp_diagnostics', False))
+        if getattr(args, 'freeze_backbone', False):
+            if self.spatial_prompt.mode == 'baseline':
+                raise ValueError('freeze_backbone requires an active spatial prompt')
+            for name, parameter in self.named_parameters():
+                parameter.requires_grad_(name.startswith('spatial_prompt.'))
+
     def _set_task(self):
         loss_names = self.args.loss_names
         self.current_task = [l.strip() for l in loss_names.split('+')]
@@ -78,8 +89,11 @@ class IRRA(nn.Module):
         x = self.ln_post(x)
         return x
 
+    def transform_image(self, image):
+        return self.spatial_prompt(image)
+
     def encode_image(self, image):
-        x = self.base_model.encode_image(image)
+        x = self.base_model.encode_image(self.transform_image(image))
         return x[:, 0, :].float()
         # return x.float() # for CLIP ResNet visual model
 
@@ -90,7 +104,7 @@ class IRRA(nn.Module):
     def forward(self, batch):
         ret = dict()
 
-        images = batch['images']
+        images = self.transform_image(batch['images'])
         caption_ids = batch['caption_ids']
         image_feats, text_feats = self.base_model(images, caption_ids)
         i_feats = image_feats[:, 0, :].float()
@@ -110,8 +124,8 @@ class IRRA(nn.Module):
             ret.update({'cmpm_loss':objectives.compute_cmpm(i_feats, t_feats, batch['pids'])})
         
         if 'id' in self.current_task:
-            image_logits = self.classifier(i_feats.half()).float()
-            text_logits = self.classifier(t_feats.half()).float()
+            image_logits = self.classifier(i_feats.to(self.classifier.weight.dtype)).float()
+            text_logits = self.classifier(t_feats.to(self.classifier.weight.dtype)).float()
             ret.update({'id_loss':objectives.compute_id(image_logits, text_logits, batch['pids'])*self.args.id_loss_weight})
 
             image_pred = torch.argmax(image_logits, dim=1)
@@ -146,5 +160,8 @@ class IRRA(nn.Module):
 def build_model(args, num_classes=11003):
     model = IRRA(args, num_classes)
     # covert model to fp16
-    convert_weights(model)
+    if getattr(args, 'precision', 'fp16') == 'fp16' and getattr(args, 'device', 'cuda') != 'cpu':
+        convert_weights(model)
+    # Legacy CLIP conversion traverses the whole model; prompts retain FP32 masters.
+    model.spatial_prompt.float()
     return model

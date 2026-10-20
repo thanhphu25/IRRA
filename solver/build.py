@@ -23,6 +23,8 @@ def build_optimizer(args, model):
         if "classifier" in key or "mlm_head" in key:
             lr = args.lr * args.lr_factor
         
+        if key.removeprefix('module.').startswith('spatial_prompt.'):
+            lr = getattr(args, 'lgsp_lr', args.lr)
         params += [{"params": [value], "lr": lr, "weight_decay": weight_decay}]
 
     if args.optimizer == "SGD":
@@ -44,7 +46,7 @@ def build_optimizer(args, model):
             eps=1e-8,
         )
     else:
-        NotImplementedError
+        raise NotImplementedError(args.optimizer)
 
     return optimizer
 

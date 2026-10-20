@@ -1,0 +1,12 @@
+.venv/
+.cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+logs/
+*.pth
+*.pt
+*.zip
+.ipynb_checkpoints/
+dist/
+pytest-cache-files-*/

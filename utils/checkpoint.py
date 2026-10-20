@@ -1,148 +1,135 @@
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
+# Checkpointer API based on the original IRRA/Facebook implementation.
+"""Strict model restoration and explicit baseline-to-prompt warm starts."""
 import logging
 import os
+import random
 from collections import OrderedDict
 
+import numpy as np
 import torch
 
 
+def strip_prefix_if_present(state_dict, prefix="module."):
+    result = OrderedDict()
+    for key, value in state_dict.items():
+        new_key = key[len(prefix):] if key.startswith(prefix) else key
+        if new_key in result:
+            raise RuntimeError(f"Duplicate checkpoint key after prefix removal: {new_key}")
+        result[new_key] = value
+    return result
+
+
+def load_state_dict(model, loaded_state_dict, allow_missing_prompts=False):
+    """Only explicit baseline warm-start may omit the entire spatial module."""
+    target = model.module if hasattr(model, 'module') else model
+    source = strip_prefix_if_present(loaded_state_dict)
+    expected = target.state_dict()
+    missing, unexpected = sorted(set(expected) - set(source)), sorted(set(source) - set(expected))
+    mismatched = [f"{k}: checkpoint {tuple(source[k].shape)} != model {tuple(expected[k].shape)}"
+                  for k in set(expected) & set(source) if source[k].shape != expected[k].shape]
+    logging.getLogger("IRRA.checkpoint").info("Missing keys: %s; Unexpected keys: %s", missing, unexpected)
+    allowed = (allow_missing_prompts and not any(k.startswith('spatial_prompt.') for k in source)
+               and all(k.startswith('spatial_prompt.') for k in missing))
+    if unexpected or mismatched or (missing and not allowed):
+        raise RuntimeError(f"Incompatible checkpoint. Missing: {missing}; Unexpected: {unexpected}; "
+                           f"Shape mismatches: {mismatched}")
+    target.load_state_dict(source, strict=not bool(missing))
+    return {"missing_keys": missing, "unexpected_keys": unexpected}
+
+
+def _rng_state():
+    state = np.random.get_state()
+    return {"torch": torch.get_rng_state(), "python": random.getstate(),
+            "numpy": [state[0], state[1].tolist(), state[2], state[3], state[4]],
+            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []}
+
+
+def _restore_rng(state):
+    torch.set_rng_state(state['torch'])
+    random.setstate(state['python'])
+    name, keys, pos, has_gauss, cached = state['numpy']
+    np.random.set_state((name, np.array(keys, dtype=np.uint32), pos, has_gauss, cached))
+    if state['cuda'] and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(state['cuda'])
+
+
 class Checkpointer:
-    def __init__(
-        self,
-        model,
-        optimizer=None,
-        scheduler=None,
-        save_dir="",
-        save_to_disk=None,
-        logger=None,
-    ):
-        self.model = model
-        self.optimizer = optimizer
-        self.scheduler = scheduler
-        self.save_dir = save_dir
-        self.save_to_disk = save_to_disk
-        if logger is None:
-            logger = logging.getLogger(__name__)
-        self.logger = logger
+    def __init__(self, model, optimizer=None, scheduler=None, save_dir="", save_to_disk=None, logger=None):
+        self.model, self.optimizer, self.scheduler = model, optimizer, scheduler
+        self.save_dir, self.save_to_disk = save_dir, save_to_disk
+        self.logger = logger or logging.getLogger("IRRA.checkpoint")
+
+    @property
+    def target(self):
+        return self.model.module if hasattr(self.model, 'module') else self.model
 
     def save(self, name, **kwargs):
-        if not self.save_dir:
+        if not self.save_dir or not self.save_to_disk:
             return
-
-        if not self.save_to_disk:
-            return
-
-        data = {}
-        data["model"] = self.model.state_dict()
+        os.makedirs(self.save_dir, exist_ok=True)
+        data = {"model": self.target.state_dict(), "format_version": 2,
+                "model_config": dict(vars(self.target.args)) if hasattr(self.target, 'args') else {},
+                "rng_state": _rng_state()}
         if self.optimizer is not None:
-            data["optimizer"] = self.optimizer.state_dict()
+            data['optimizer'] = self.optimizer.state_dict()
         if self.scheduler is not None:
-            data["scheduler"] = self.scheduler.state_dict()
+            data['scheduler'] = self.scheduler.state_dict()
         data.update(kwargs)
+        path = os.path.join(self.save_dir, name + '.pth')
+        self.logger.info("Saving checkpoint to %s", path)
+        torch.save(data, path)
 
-        save_file = os.path.join(self.save_dir, "{}.pth".format(name))
-        self.logger.info("Saving checkpoint to {}".format(save_file))
-        torch.save(data, save_file)
+    def _load_file(self, path):
+        checkpoint = torch.load(path, map_location='cpu', weights_only=True)
+        if not isinstance(checkpoint, dict):
+            raise RuntimeError("Checkpoint must be an IRRA payload or tensor state_dict")
+        if 'model' not in checkpoint:
+            if not checkpoint or not all(torch.is_tensor(v) for v in checkpoint.values()):
+                raise RuntimeError("Checkpoint has neither model weights nor a tensor state_dict")
+            checkpoint = {"model": checkpoint}
+        return checkpoint
+
+    def _load_model(self, checkpoint, warm_start=False):
+        source = strip_prefix_if_present(checkpoint['model'])
+        saved = checkpoint.get('model_config', {})
+        # Non-tensor options change the computation too: prevent silent mismatches.
+        if any(k.startswith('spatial_prompt.') for k in source) and hasattr(self.target, 'args'):
+            current = vars(self.target.args)
+            relevant = [k for k in saved if k == 'lgsp_mode' or
+                        k.startswith(('frequency_', 'local_')) and k != 'local_rank' and not k.endswith('_alpha_init')]
+            differences = [k for k in relevant if saved[k] != current.get(k)]
+            if differences:
+                raise RuntimeError(f"Prompt configuration differs from checkpoint: {differences}")
+        # A new prompt checkpoint with *all* prompt tensors removed is corrupt too.
+        if saved.get('lgsp_mode', 'baseline') != 'baseline' and not any(k.startswith('spatial_prompt.') for k in source):
+            raise RuntimeError("Checkpoint declares LGSP but all spatial_prompt keys are missing")
+        return load_state_dict(self.model, source, allow_missing_prompts=warm_start)
 
     def load(self, f=None):
+        """Strict model-only restore for evaluation of a trained model."""
         if not f:
-            # no checkpoint could be found
-            self.logger.info("No checkpoint found.")
-            return {}
-        self.logger.info("Loading checkpoint from {}".format(f))
+            raise ValueError("A checkpoint path is required")
         checkpoint = self._load_file(f)
         self._load_model(checkpoint)
+        return {k: v for k, v in checkpoint.items() if k not in ('model', 'optimizer', 'scheduler', 'rng_state')}
+
+    def warm_start(self, path):
+        """Initialize weights, permitting only missing new prompts; never load optimizer/RNG."""
+        checkpoint = self._load_file(path)
+        report = self._load_model(checkpoint, warm_start=True)
+        self.logger.info("Warm start %s; optimizer/scheduler remain fresh. %s", path, report)
+        return report
 
     def resume(self, f=None):
         if not f:
-            # no checkpoint could be found
-            self.logger.info("No checkpoint found.")
-            raise IOError(f"No Checkpoint file found on {f}")
-        self.logger.info("Loading checkpoint from {}".format(f))
+            raise ValueError("A resume checkpoint path is required")
         checkpoint = self._load_file(f)
         self._load_model(checkpoint)
-        if "optimizer" in checkpoint and self.optimizer:
-            self.logger.info("Loading optimizer from {}".format(f))
-            self.optimizer.load_state_dict(checkpoint.pop("optimizer"))
-        if "scheduler" in checkpoint and self.scheduler:
-            self.logger.info("Loading scheduler from {}".format(f))
-            self.scheduler.load_state_dict(checkpoint.pop("scheduler"))
-        # return any further checkpoint data
-        return checkpoint
-
-    def _load_file(self, f):
-        return torch.load(f, map_location=torch.device("cpu"))
-
-    def _load_model(self, checkpoint, except_keys=None):
-        load_state_dict(self.model, checkpoint.pop("model"), except_keys)
-
-
-def check_key(key, except_keys):
-    if except_keys is None:
-        return False
-    else:
-        for except_key in except_keys:
-            if except_key in key:
-                return True
-        return False
-
-
-def align_and_update_state_dicts(model_state_dict, loaded_state_dict, except_keys=None):
-    current_keys = sorted(list(model_state_dict.keys()))
-    loaded_keys = sorted(list(loaded_state_dict.keys()))
-    # get a matrix of string matches, where each (i, j) entry correspond to the size of the
-    # loaded_key string, if it matches
-    match_matrix = [
-        len(j) if i.endswith(j) else 0 for i in current_keys for j in loaded_keys
-    ]
-    match_matrix = torch.as_tensor(match_matrix).view(
-        len(current_keys), len(loaded_keys)
-    )
-    max_match_size, idxs = match_matrix.max(1)
-    # remove indices that correspond to no-match
-    idxs[max_match_size == 0] = -1
-
-    # used for logging
-    max_size = max([len(key) for key in current_keys]) if current_keys else 1
-    max_size_loaded = max([len(key) for key in loaded_keys]) if loaded_keys else 1
-    log_str_template = "{: <{}} loaded from {: <{}} of shape {}"
-    logger = logging.getLogger("PersonSearch.checkpoint")
-    for idx_new, idx_old in enumerate(idxs.tolist()):
-        if idx_old == -1:
-            continue
-        key = current_keys[idx_new]
-        key_old = loaded_keys[idx_old]
-        if check_key(key, except_keys):
-            continue
-        model_state_dict[key] = loaded_state_dict[key_old]
-        logger.info(
-            log_str_template.format(
-                key,
-                max_size,
-                key_old,
-                max_size_loaded,
-                tuple(loaded_state_dict[key_old].shape),
-            )
-        )
-
-
-def strip_prefix_if_present(state_dict, prefix):
-    keys = sorted(state_dict.keys())
-    if not all(key.startswith(prefix) for key in keys):
-        return state_dict
-    stripped_state_dict = OrderedDict()
-    for key, value in state_dict.items():
-        stripped_state_dict[key.replace(prefix, "")] = value
-    return stripped_state_dict
-
-
-def load_state_dict(model, loaded_state_dict, except_keys=None):
-    model_state_dict = model.state_dict()
-    # if the state_dict comes from a model that was wrapped in a
-    # DataParallel or DistributedDataParallel during serialization,
-    # remove the "module" prefix before performing the matching
-    loaded_state_dict = strip_prefix_if_present(loaded_state_dict, prefix="module.")
-    align_and_update_state_dicts(model_state_dict, loaded_state_dict, except_keys)
-
-    # use strict loading
-    model.load_state_dict(model_state_dict)
+        for key, component in (("optimizer", self.optimizer), ("scheduler", self.scheduler)):
+            if component is not None:
+                if key not in checkpoint:
+                    raise RuntimeError(f"Cannot resume: missing {key} state")
+                component.load_state_dict(checkpoint[key])
+        if 'rng_state' in checkpoint:
+            _restore_rng(checkpoint['rng_state'])
+        return {k: v for k, v in checkpoint.items() if k not in ('model', 'optimizer', 'scheduler', 'rng_state')}

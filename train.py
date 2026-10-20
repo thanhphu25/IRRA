@@ -4,6 +4,7 @@ import torch
 import numpy as np
 import random
 import time
+from datetime import datetime
 
 from datasets import build_dataloader
 from processor.processor import do_train
@@ -17,19 +18,19 @@ from utils.options import get_args
 from utils.comm import get_rank, synchronize
 
 
-def set_seed(seed=0):
+def set_seed(seed=0, deterministic=False):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
     random.seed(seed)
     torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.benchmark = not deterministic
 
 
 if __name__ == '__main__':
     args = get_args()
-    set_seed(1+get_rank())
+    set_seed(args.seed+get_rank(), args.deterministic)
     name = args.name
 
     num_gpus = int(os.environ["WORLD_SIZE"]) if "WORLD_SIZE" in os.environ else 1
@@ -40,17 +41,27 @@ if __name__ == '__main__':
         torch.distributed.init_process_group(backend="nccl", init_method="env://")
         synchronize()
     
-    device = "cuda"
-    cur_time = time.strftime("%Y%m%d_%H%M%S", time.localtime())
-    args.output_dir = op.join(args.output_dir, args.dataset_name, f'{cur_time}_{name}')
-    logger = setup_logger('IRRA', save_dir=args.output_dir, if_train=args.training, distributed_rank=get_rank())
+    device = args.device
+    if args.resume:
+        if not args.resume_ckpt_file:
+            raise ValueError('--resume requires --resume_ckpt_file')
+        args.output_dir = op.dirname(op.abspath(args.resume_ckpt_file))
+    else:
+        cur_time = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        args.output_dir = op.join(args.output_dir, args.dataset_name, f'{cur_time}_{name}')
+        os.makedirs(args.output_dir, exist_ok=False)
+    logger = setup_logger('IRRA', save_dir=args.output_dir, if_train=args.training, distributed_rank=get_rank(), append=args.resume)
     logger.info("Using {} GPUs".format(num_gpus))
     logger.info(str(args).replace(',', '\n'))
-    save_train_configs(args.output_dir, args)
 
     # get image-text pair datasets dataloader
     train_loader, val_img_loader, val_txt_loader, num_classes = build_dataloader(args)
+    args.num_classes = num_classes
+    if get_rank() == 0 and not args.resume:
+        save_train_configs(args.output_dir, args)
     model = build_model(args, num_classes)
+    if args.init_checkpoint:
+        Checkpointer(model).warm_start(args.init_checkpoint)
     logger.info('Total params: %2.fM' % (sum(p.numel() for p in model.parameters()) / 1000000.0))
     model.to(device)
 
@@ -67,11 +78,16 @@ if __name__ == '__main__':
 
     is_master = get_rank() == 0
     checkpointer = Checkpointer(model, optimizer, scheduler, args.output_dir, is_master)
-    evaluator = Evaluator(val_img_loader, val_txt_loader)
+    evaluator = Evaluator(val_img_loader, val_txt_loader, chunk_size=args.eval_chunk_size)
 
     start_epoch = 1
     if args.resume:
         checkpoint = checkpointer.resume(args.resume_ckpt_file)
-        start_epoch = checkpoint['epoch']
+        start_epoch = checkpoint['epoch'] + 1
+        args.best_top1 = checkpoint.get('best_top1', -1.0)
+        args.best_epoch = checkpoint.get('best_epoch', checkpoint['epoch'])
+    else:
+        # Prompt initialization must not change batch order/augmentation RNG vs E0.
+        set_seed(args.seed + get_rank(), args.deterministic)
 
     do_train(start_epoch, args, model, train_loader, evaluator, optimizer, scheduler, checkpointer)

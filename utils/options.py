@@ -1,17 +1,45 @@
 import argparse
+from pathlib import Path
+import yaml
 
 
-def get_args():
+def get_args(argv=None):
     parser = argparse.ArgumentParser(description="IRRA Args")
+    parser.add_argument('--config_file', default=None, help='saved configs.yaml; explicit CLI values override it')
     ######################## general settings ########################
     parser.add_argument("--local_rank", default=0, type=int)
     parser.add_argument("--name", default="baseline", help="experiment name to save")
     parser.add_argument("--output_dir", default="logs")
-    parser.add_argument("--log_period", default=100)
-    parser.add_argument("--eval_period", default=1)
+    parser.add_argument("--log_period", type=int, default=100)
+    parser.add_argument("--eval_period", type=int, default=1)
     parser.add_argument("--val_dataset", default="test") # use val set when evaluate, if test use test set
+    parser.add_argument('--holdout_fraction', type=float, default=0.1)
+    parser.add_argument('--holdout_seed', type=int, default=42)
     parser.add_argument("--resume", default=False, action='store_true')
     parser.add_argument("--resume_ckpt_file", default="", help='resume from ...')
+    parser.add_argument("--init_checkpoint", default="", help="model-only warm start; fresh optimizer/scheduler")
+    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--deterministic", action="store_true")
+    parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
+    parser.add_argument("--precision", choices=["fp16", "fp32"], default="fp16")
+    parser.add_argument("--eval_chunk_size", type=int, default=128)
+    parser.add_argument("--lgsp_mode", choices=["baseline", "local", "frequency", "both"], default="baseline")
+    parser.add_argument("--frequency_num_rings", type=int, default=8)
+    parser.add_argument("--frequency_temperature", type=float, default=1.0)
+    parser.add_argument("--frequency_alpha_init", type=float, default=1e-3)
+    parser.add_argument("--frequency_variant", choices=["real", "lgsp_original"], default="real")
+    parser.add_argument('--local_pool_size', type=int, default=4)
+    parser.add_argument('--local_hidden_dim', type=int, default=8)
+    parser.add_argument('--local_kernel_size', type=int, default=3)
+    parser.add_argument('--local_selection', choices=['softmax', 'topk'], default='softmax')
+    parser.add_argument('--local_top_k', type=int, default=2)
+    parser.add_argument('--local_temperature', type=float, default=1.0)
+    parser.add_argument('--local_dropout', type=float, default=0.0)
+    parser.add_argument('--local_alpha_init', type=float, default=1e-3)
+    parser.add_argument('--local_checkpoint', action='store_true', help='recompute CNN activations in backward')
+    parser.add_argument("--lgsp_lr", type=float, default=1e-3)
+    parser.add_argument("--freeze_backbone", action="store_true")
+    parser.add_argument("--lgsp_diagnostics", action="store_true")
 
     ######################## model general settings ########################
     parser.add_argument("--pretrain_choice", default='ViT-B/16') # whether use pretrained model
@@ -31,7 +59,7 @@ def get_args():
     parser.add_argument("--id_loss_weight", type=float, default=1.0, help="id loss weight")
     
     ######################## vison trainsformer settings ########################
-    parser.add_argument("--img_size", type=tuple, default=(384, 128))
+    parser.add_argument("--img_size", type=int, nargs=2, default=(384, 128), metavar=("H", "W"))
     parser.add_argument("--stride_size", type=int, default=16)
 
     ######################## text transformer settings ########################
@@ -69,6 +97,27 @@ def get_args():
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--test", dest='training', default=True, action='store_false')
 
-    args = parser.parse_args()
+    preliminary, _ = parser.parse_known_args(argv)
+    config_path = preliminary.config_file
+    if preliminary.resume and not config_path and preliminary.resume_ckpt_file:
+        config_path = str(Path(preliminary.resume_ckpt_file).parent / 'configs.yaml')
+    if config_path:
+        with open(config_path, encoding='utf-8') as f:
+            saved = yaml.load(f, Loader=yaml.FullLoader)
+        if not isinstance(saved, dict):
+            parser.error('config_file must contain a mapping')
+        # Runtime state must be explicitly selected for each invocation.
+        for key in ('resume', 'resume_ckpt_file', 'init_checkpoint', 'config_file', 'training', 'distributed'):
+            saved.pop(key, None)
+        parser.set_defaults(**saved)
+    args = parser.parse_args(argv)
+    if args.resume and args.init_checkpoint:
+        parser.error('--resume and --init_checkpoint are mutually exclusive')
+    if args.num_epoch <= 0 or args.eval_period <= 0:
+        parser.error('num_epoch and eval_period must be positive')
+    if args.lgsp_mode not in ('baseline', 'local', 'frequency', 'both'):
+        parser.error('invalid lgsp_mode in configuration')
+    if args.freeze_backbone and args.lgsp_mode == 'baseline':
+        parser.error('--freeze_backbone needs an active LGSP mode')
 
     return args

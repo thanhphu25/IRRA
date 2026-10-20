@@ -4,7 +4,7 @@ import sys
 import os.path as op
 
 
-def setup_logger(name, save_dir, if_train, distributed_rank=0):
+def setup_logger(name, save_dir, if_train, distributed_rank=0, append=False):
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)
 
@@ -22,9 +22,9 @@ def setup_logger(name, save_dir, if_train, distributed_rank=0):
         print(f"{save_dir} is not exists, create given directory")
         os.makedirs(save_dir)
     if if_train:
-        fh = logging.FileHandler(os.path.join(save_dir, "train_log.txt"), mode='w')
+        fh = logging.FileHandler(os.path.join(save_dir, "train_log.txt"), mode='a' if append else 'w', encoding='utf-8')
     else:
-        fh = logging.FileHandler(os.path.join(save_dir, "test_log.txt"), mode='a')
+        fh = logging.FileHandler(os.path.join(save_dir, "test_log.txt"), mode='a', encoding='utf-8')
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(formatter)
     logger.addHandler(fh)

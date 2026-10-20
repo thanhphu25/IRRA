@@ -1,0 +1,9 @@
+# Reuse Kaggle's torch/torchvision. Python >=3.9, torch >=2.1 recommended.
+prettytable
+easydict
+ftfy
+regex
+tensorboard
+PyYAML
+tqdm
+pytest

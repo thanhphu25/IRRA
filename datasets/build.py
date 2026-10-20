@@ -13,6 +13,7 @@ from .bases import ImageDataset, TextDataset, ImageTextDataset, ImageTextMLMData
 from .cuhkpedes import CUHKPEDES
 from .icfgpedes import ICFGPEDES
 from .rstpreid import RSTPReid
+from .splits import train_validation_holdout
 
 __factory = {'CUHK-PEDES': CUHKPEDES, 'ICFG-PEDES': ICFGPEDES, 'RSTPReid': RSTPReid}
 
@@ -76,6 +77,21 @@ def build_dataloader(args, tranforms=None):
     num_classes = len(dataset.train_id_container)
     
     if args.training:
+        if args.val_dataset == 'holdout':
+            dataset.train, validation, held_ids = train_validation_holdout(
+                dataset.train, args.holdout_fraction, args.holdout_seed)
+            args.validation_protocol = dict(split='train_identity_holdout',
+                fraction=args.holdout_fraction, seed=args.holdout_seed, held_out_ids=held_ids)
+            logger.info('Train-only holdout: %d identities, original classifier indices retained', len(held_ids))
+        elif args.val_dataset in ('val', 'test'):
+            validation = dataset.val if args.val_dataset == 'val' else dataset.test
+            args.validation_protocol = dict(split=args.val_dataset)
+            if args.val_dataset == 'test':
+                logger.warning('Historical protocol: selecting checkpoints on test; do not use for new hyperparameter tuning')
+        else:
+            raise ValueError('--val_dataset must be test, val, or holdout')
+        if not validation['img_paths'] or not validation['captions']:
+            raise ValueError('Empty validation split; use --val_dataset holdout for a train-only holdout')
         train_transforms = build_transforms(img_size=args.img_size,
                                             aug=args.img_aug,
                                             is_train=True)
@@ -125,7 +141,7 @@ def build_dataloader(args, tranforms=None):
             logger.error('unsupported sampler! expected softmax or triplet but got {}'.format(args.sampler))
 
         # use test set as validate set
-        ds = dataset.val if args.val_dataset == 'val' else dataset.test
+        ds = validation
         val_img_set = ImageDataset(ds['image_pids'], ds['img_paths'],
                                    val_transforms)
         val_txt_set = TextDataset(ds['caption_pids'],
