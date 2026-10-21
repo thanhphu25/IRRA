@@ -8,3 +8,8 @@ logs/
 SCFP_V2_runs/
 *.zip
 .ipynb_checkpoints/
+
+# Generated diagnostic outputs; keep audit code, notebooks and reports in source.
+/experiments/scfp/reports/audit_*/
+/SCFP_V2_AUDIT/
+/SCFP_V2_AUDIT_*/

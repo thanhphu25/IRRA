@@ -23,7 +23,9 @@ def bundle(destination):
     with zipfile.ZipFile(destination, 'x', compression=zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(set(paths)):
             if path.is_file():
-                name = str(path.relative_to(root))
+                # ZIP entries and their manifest must agree on Kaggle/Linux even
+                # when this bundle is produced from a Windows workspace.
+                name = path.relative_to(root).as_posix()
                 archive.write(path, name)
                 hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
         archive.writestr('source_manifest.json', json.dumps(hashes, indent=2))

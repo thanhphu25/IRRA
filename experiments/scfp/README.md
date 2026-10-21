@@ -1,5 +1,11 @@
 # SCFP V2: Semantic Slots + Adaptive Feature-level DFT
 
+Post-training audit (no retraining): [Vietnamese audit report and Kaggle commands](SCFP_V2_AUDIT.md),
+[diagnostic notebook](../../notebooks/irra_scfp_v2_audit_kaggle.ipynb),
+or `python -m experiments.scfp.audit --help`. The audit reads existing V2 weights,
+measures actual frequency responses/slot attention/shared-backbone gradients, and
+compares frequency ON/OFF on an explicitly labeled fixed training subset.
+
 This is an experimental extension of IRRA, **not an established improvement**.
 V3 semantic guidance, teachers and distillation are deliberately absent.
 
